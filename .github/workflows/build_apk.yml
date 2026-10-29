@@ -3,9 +3,7 @@ name: Build Android APK
 on:
   push:
     branches: [ "main", "master" ]
-  pull_request:
-    branches: [ "main", "master" ]
-  workflow_dispatch: # Allows manual trigger from GitHub UI
+  workflow_dispatch:
 
 jobs:
   build:
@@ -21,15 +19,24 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Grant Execute Permission to Gradlew
-        run: chmod +x gradlew
+      # 1. Shows your folder structure in the logs
+      - name: List Repository Files
+        run: ls -la
 
+      # 2. Installs Gradle directly (no gradlew file required)
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      # 3. Builds using system Gradle
       - name: Build Debug APK
-        run: ./gradlew assembleDebug
+        run: gradle assembleDebug --stacktrace
 
+      # 4. Uploads the generated APK
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: spotify-app-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          path: '**/*.apk'
           retention-days: 14
