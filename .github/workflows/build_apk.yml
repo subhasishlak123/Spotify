@@ -24,22 +24,19 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      # Automatically organizes files into the standard Android structure
-      - name: Auto-structure Android Project
+      - name: Prepare Clean Android Project
         run: |
           mkdir -p app/src/main/java/com/example/spotifyclone
 
-          # Move files into app/ if they are in the root directory
-          if [ -f "AndroidManifest.xml" ]; then
-            mv AndroidManifest.xml app/src/main/AndroidManifest.xml
-          fi
-          if [ -f "PlaybackService.kt" ]; then
-            mv PlaybackService.kt app/src/main/java/com/example/spotifyclone/PlaybackService.kt
-          fi
+          # 1. Properties
+          cat << 'EOF' > gradle.properties
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          EOF
 
-          # Create app/build.gradle.kts if missing
-          if [ ! -f "app/build.gradle.kts" ]; then
-            cat << 'EOF' > app/build.gradle.kts
+          # 2. Build configuration
+          cat << 'EOF' > app/build.gradle.kts
           plugins {
               id("com.android.application")
               id("org.jetbrains.kotlin.android")
@@ -68,14 +65,192 @@ jobs:
 
           dependencies {
               implementation("androidx.core:core-ktx:1.12.0")
-              implementation("androidx.appcompat:appcompat:1.6.1")
               val media3Version = "1.3.1"
               implementation("androidx.media3:media3-exoplayer:$media3Version")
               implementation("androidx.media3:media3-session:$media3Version")
               implementation("androidx.media3:media3-ui:$media3Version")
           }
           EOF
-          fi
+
+          # 3. Crash-Proof MainActivity with on-screen error reporter
+          cat << 'EOF' > app/src/main/java/com/example/spotifyclone/MainActivity.kt
+          package com.example.spotifyclone
+
+          import android.app.Activity
+          import android.content.ComponentName
+          import android.os.Bundle
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.TextView
+          import androidx.core.content.ContextCompat
+          import androidx.media3.common.MediaItem
+          import androidx.media3.session.MediaController
+          import androidx.media3.session.SessionToken
+
+          class MainActivity : Activity() {
+              private var controller: MediaController? = null
+              private lateinit var statusText: TextView
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+
+                  val scroll = ScrollView(this)
+                  val layout = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(50, 100, 50, 50)
+                  }
+
+                  statusText = TextView(this).apply {
+                      text = "Status: Ready\nTap Play to start background music."
+                      textSize = 16f
+                      setPadding(0, 0, 0, 30)
+                  }
+
+                  val playBtn = Button(this).apply {
+                      text = "▶ Play Music (Background)"
+                      setOnClickListener {
+                          startMusic()
+                      }
+                  }
+
+                  val pauseBtn = Button(this).apply {
+                      text = "⏸ Pause (Stops Background Service)"
+                      setOnClickListener {
+                          try {
+                              controller?.pause()
+                              statusText.text = "Status: Paused"
+                          } catch (e: Exception) {
+                              statusText.text = "Error pausing: ${e.message}"
+                          }
+                      }
+                  }
+
+                  layout.addView(statusText)
+                  layout.addView(playBtn)
+                  layout.addView(pauseBtn)
+                  scroll.addView(layout)
+                  setContentView(scroll)
+              }
+
+              private fun startMusic() {
+                  try {
+                      statusText.text = "Connecting to background service..."
+                      val token = SessionToken(this, ComponentName(this, PlaybackService::class.java))
+                      val controllerFuture = MediaController.Builder(this, token).buildAsync()
+                      controllerFuture.addListener({
+                          try {
+                              controller = controllerFuture.get()
+                              controller?.let { player ->
+                                  val item = MediaItem.fromUri("https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3")
+                                  player.setMediaItem(item)
+                                  player.prepare()
+                                  player.play()
+                                  statusText.text = "Status: Playing!\nYou can now close the app, music will stay in background."
+                              }
+                          } catch (e: Exception) {
+                              statusText.text = "Playback Error:\n${e.message}\n${e.stackTraceToString()}"
+                          }
+                      }, ContextCompat.getMainExecutor(this))
+                  } catch (e: Exception) {
+                      statusText.text = "Service Error:\n${e.message}\n${e.stackTraceToString()}"
+                  }
+              }
+
+              override fun onDestroy() {
+                  super.onDestroy()
+                  controller?.release()
+              }
+          }
+          EOF
+
+          # 4. Background Playback Service
+          cat << 'EOF' > app/src/main/java/com/example/spotifyclone/PlaybackService.kt
+          package com.example.spotifyclone
+
+          import android.app.Service
+          import androidx.media3.common.Player
+          import androidx.media3.exoplayer.ExoPlayer
+          import androidx.media3.session.MediaSession
+          import androidx.media3.session.MediaSessionService
+
+          class PlaybackService : MediaSessionService() {
+              private var mediaSession: MediaSession? = null
+
+              override fun onCreate() {
+                  super.onCreate()
+                  val player = ExoPlayer.Builder(this).build()
+
+                  player.addListener(object : Player.Listener {
+                      override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                          if (!playWhenReady) {
+                              stopForeground(Service.STOP_FOREGROUND_DETACH)
+                          }
+                      }
+
+                      override fun onPlaybackStateChanged(playbackState: Int) {
+                          if (playbackState == Player.STATE_ENDED) {
+                              stopSelf()
+                          }
+                      }
+                  })
+
+                  mediaSession = MediaSession.Builder(this, player).build()
+              }
+
+              override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? {
+                  return mediaSession
+              }
+
+              override fun onDestroy() {
+                  mediaSession?.run {
+                      player.release()
+                      release()
+                      mediaSession = null
+                  }
+                  super.onDestroy()
+              }
+          }
+          EOF
+
+          # 5. AndroidManifest.xml (Uses standard Android icon so notifications never crash)
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+              <application
+                  android:allowBackup="true"
+                  android:label="Spotify"
+                  android:icon="@android:drawable/ic_media_play"
+                  android:usesCleartextTraffic="true"
+                  android:supportsRtl="true"
+                  android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".PlaybackService"
+                      android:foregroundServiceType="mediaPlayback"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="androidx.media3.session.MediaSessionService" />
+                      </intent-filter>
+                  </service>
+              </application>
+          </manifest>
+          EOF
 
       - name: Build Debug APK
         run: gradle assembleDebug --stacktrace
